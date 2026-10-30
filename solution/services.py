@@ -8,8 +8,10 @@ import time
 from domain import (
     Application,
     ChecklistPolicy,
+    DomainError,
     SupplementValidator,
     now,
+    processing_deadline,
     require,
     text,
     uid,
@@ -30,7 +32,7 @@ class SessionService:
         )
         return value
 
-    def sendCode(self, command):
+    def send_code(self, command):
         phone = self.phone(command.get("phone"))
         mode = command.get("mode")
         require(mode in ("register", "login"), "Выберите вход или регистрацию.")
@@ -74,7 +76,7 @@ class SessionService:
                 (challenge["id"],),
             )
             self.store.commit()
-            require(False, "Неверный код. Для учебной демонстрации: 123456.", 401)
+            raise DomainError("Неверный код. Для учебной демонстрации: 123456.", 401)
         user = self.store.one(
             "SELECT * FROM users WHERE phone=?", (challenge["phone"],)
         )
@@ -84,7 +86,8 @@ class SessionService:
                 id=uid(), phone=challenge["phone"], role="APPLICANT", registeredAt=now()
             )
             self.store.db.execute(
-                "INSERT INTO users VALUES (?,?,?,?)", tuple(user.values())
+                "INSERT INTO users(id,phone,role,registeredAt) VALUES (?,?,?,?)",
+                (user["id"], user["phone"], user["role"], user["registeredAt"]),
             )
         else:
             require(user, "Телефон не зарегистрирован. Выберите «Регистрация».", 401)
@@ -106,7 +109,7 @@ class SessionService:
         self.store.commit()
         return token, dict(user=user, csrf=csrf)
 
-    def requireSession(self, token):
+    def require_session(self, token):
         session = self.store.one(
             "SELECT s.*,u.id,u.phone,u.role FROM sessions s JOIN users u ON u.id=s.userId "
             "WHERE tokenHash=? AND expiresAt>?",
@@ -115,14 +118,14 @@ class SessionService:
         require(session, "Сеанс завершён. Войдите заново.", 401)
         return session
 
-    def requireApplicant(self, sessionToken):
-        return self.requireRole(self.requireSession(sessionToken), "APPLICANT")
+    def require_applicant(self, session_token):
+        return self.require_role(self.require_session(session_token), "APPLICANT")
 
-    def requireSpecialist(self, sessionToken):
-        return self.requireRole(self.requireSession(sessionToken), "SPECIALIST")
+    def require_specialist(self, session_token):
+        return self.require_role(self.require_session(session_token), "SPECIALIST")
 
     @staticmethod
-    def requireRole(user, role):
+    def require_role(user, role):
         require(user["role"] == role, "Недостаточно прав для этой операции.", 403)
         return user
 
@@ -132,13 +135,13 @@ class SubmissionService:
         self.store = repository
 
     def submit(self, user, command):
-        SessionService.requireRole(user, "APPLICANT")
-        q, documents = SupplementValidator().validate(command)
-        checklist = ChecklistPolicy().calculate(q)
-        change = Application.submit(user["id"], q, checklist, documents)
+        SessionService.require_role(user, "APPLICANT")
+        questionnaire, documents = SupplementValidator().validate(command)
+        checklist = ChecklistPolicy().calculate(questionnaire)
+        change = Application.submit(user["id"], questionnaire, checklist, documents)
         self.store.save(change)
         self.store.commit()
-        return change.applicationId
+        return change.application_id
 
 
 class SupplementService:
@@ -146,29 +149,31 @@ class SupplementService:
         self.store = repository
 
     def submit(self, user, command):
-        SessionService.requireRole(user, "APPLICANT")
+        SessionService.require_role(user, "APPLICANT")
         text(command.get("sourceVersionId"), "Исходная версия", 80)
         text(command.get("requestId"), "Запрос дополнения", 80)
-        context = self.store.loadSupplementContext(
+        context = self.store.load_supplement_context(
             command.get("applicationId"), user["id"], command.get("sourceVersionId")
         )
-        q, documents = SupplementValidator().validate(command, context)
-        checklist = ChecklistPolicy().calculate(q)
-        application = self.store.beginAndLock(command.get("applicationId"), user["id"])
-        change = application.acceptSupplement(
-            user["id"], command, q, checklist, documents
+        questionnaire, documents = SupplementValidator().validate(command, context)
+        checklist = ChecklistPolicy().calculate(questionnaire)
+        application = self.store.begin_and_lock(
+            command.get("applicationId"), user["id"]
+        )
+        change = application.accept_supplement(
+            user["id"], command, questionnaire, checklist, documents
         )
         self.store.save(change)
         self.store.commit()
-        return change.applicationId
+        return change.application_id
 
 
 class SupplementController:
     def __init__(self, repository):
         self.store = repository
 
-    def submit(self, sessionToken, command):
-        user = SessionService(self.store).requireApplicant(sessionToken)
+    def submit(self, session_token, command):
+        user = SessionService(self.store).require_applicant(session_token)
         return SupplementService(self.store).submit(user, command)
 
 
@@ -176,41 +181,48 @@ class ReviewService:
     def __init__(self, repository):
         self.store = repository
 
-    def execute(self, action, user, applicationId, command):
-        SessionService.requireRole(user, "SPECIALIST")
-        application = self.store.beginAndLockForReview(applicationId, user["id"])
+    def execute(self, action, user, application_id, command):
+        SessionService.require_role(user, "SPECIALIST")
+        application = self.store.begin_and_lock_for_review(application_id, user["id"])
         if action == "start":
-            change = application.startReview(user["id"], command.get("sourceVersionId"))
+            change = application.start_review(
+                user["id"], command.get("sourceVersionId")
+            )
         else:
             method = {
-                "assess": application.saveAssessment,
-                "request": application.requestSupplement,
+                "assess": application.save_assessment,
+                "request": application.request_supplement,
                 "complete": application.complete,
             }[action]
             change = method(user["id"], command)
         self.store.save(change)
         self.store.commit()
-        return applicationId
+        return application_id
 
 
 class ApplicationQueryService:
     def __init__(self, repository):
         self.store = repository
 
-    def listApplications(self, user):
+    def list_applications(self, user):
         if user["role"] == "APPLICANT":
-            return self.store.many(
+            applications = self.store.many(
                 "SELECT * FROM applications WHERE applicantId=? ORDER BY submittedAt DESC,id",
                 (user["id"],),
             )
-        return self.store.many(
-            "SELECT a.*,u.phone AS applicantPhone FROM applications a JOIN users u "
-            "ON u.id=a.applicantId ORDER BY submittedAt DESC,a.id"
-        )
+        else:
+            applications = self.store.many(
+                "SELECT a.*,u.phone AS applicantPhone FROM applications a JOIN users u "
+                "ON u.id=a.applicantId ORDER BY submittedAt DESC,a.id"
+            )
 
-    def getOwnApplication(self, user, applicationId):
+        for application in applications:
+            application["dueAt"] = processing_deadline(application["submittedAt"])
+        return applications
+
+    def get_own_application(self, user, application_id):
         # A read transaction keeps versions, status and history in a consistent snapshot.
         self.store.db.execute("BEGIN")
-        result = self.store.view(applicationId, user)
+        result = self.store.view(application_id, user)
         self.store.commit()
         return result

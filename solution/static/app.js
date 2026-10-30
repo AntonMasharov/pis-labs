@@ -21,15 +21,16 @@ const titles = {
   5.2: "Цветные фотографии",
   5.3: "ИНН",
 };
-let state = {
+const state = {
   user: null,
   csrf: "",
   applications: [],
   mode: "login",
   challenge: null,
+  phone: "",
 };
 let noticeTimer;
-const esc = (value) =>
+const escapeHtml = (value) =>
   String(value ?? "").replace(
     /[&<>"']/g,
     (c) =>
@@ -37,7 +38,7 @@ const esc = (value) =>
         c
       ],
   );
-const date = (value) =>
+const formatDate = (value) =>
   new Date(value).toLocaleString("ru-RU", {
     dateStyle: "short",
     timeStyle: "short",
@@ -45,9 +46,17 @@ const date = (value) =>
   });
 const shortId = (value) => value.slice(0, 8).toUpperCase();
 const badge = (status) =>
-  `<span class="badge ${esc(status)}">${esc(statuses[status])}</span>`;
+  `<span class="badge ${escapeHtml(status)}">${escapeHtml(statuses[status])}</span>`;
 const brand =
   '<div class="brand"><span class="brand-icon">✓</span>Комплект</div>';
+
+function deadlineHtml(application) {
+  const overdue =
+    application.status !== "COMPLETED" &&
+    Date.now() > Date.parse(application.dueAt);
+  const label = overdue ? "Срок истёк" : "Срок исполнения";
+  return `<span class="${overdue ? "deadline-overdue" : ""}">${label}: до ${formatDate(application.dueAt)}</span>`;
+}
 
 function notify(message, success = false) {
   clearTimeout(noticeTimer);
@@ -89,13 +98,18 @@ function on(selector, event, handler) {
       if (event === "submit") e.preventDefault();
       const buttons = [...element.querySelectorAll("button")];
       if (element.matches("button")) buttons.push(element);
-      buttons.forEach((b) => (b.disabled = true));
+      const disabledStates = buttons.map((button) => button.disabled);
+      buttons.forEach((button) => {
+        button.disabled = true;
+      });
       try {
         await handler(e);
       } catch (error) {
         notify(error.message);
       } finally {
-        buttons.forEach((b) => (b.disabled = false));
+        buttons.forEach((button, index) => {
+          button.disabled = disabledStates[index];
+        });
       }
     });
 }
@@ -109,11 +123,11 @@ function authScreen() {
     <div class="steps"><div class="step"><b>01 / Анкета</b>Индивидуальный перечень</div><div class="step"><b>02 / Проверка</b>Помощь специалиста</div><div class="step"><b>03 / Результат</b>Заключение и история</div></div>
     </div><footer>Учебный сервис · ПИС · Раздел 5<br>Экзамен, получение ИНН и выдача патента выполняются вне сервиса.</footer></section>
     <section class="auth-card"><div><div class="eyebrow">Личный кабинет</div><h2>${state.challenge ? "Подтвердите телефон" : "Добро пожаловать"}</h2>
-    <p class="muted">${state.challenge ? `Код для ${esc(state.phone)}` : "Войдите, чтобы продолжить подготовку комплекта."}</p>
+    <p class="muted">${state.challenge ? `Код для ${escapeHtml(state.phone)}` : "Войдите, чтобы продолжить подготовку комплекта."}</p>
     ${
       !state.challenge
         ? `<div class="tabs"><button id="login-tab" class="${!register ? "active" : ""}" type="button">Вход</button><button id="register-tab" class="${register ? "active" : ""}" type="button">Регистрация</button></div>
-    <form id="phone-form"><label>Номер телефона<input id="phone" type="tel" placeholder="+7 999 123-45-67" autocomplete="tel" required value="${esc(state.phone || "")}"></label><button class="submit">Получить SMS-код</button></form>`
+    <form id="phone-form"><label>Номер телефона<input id="phone" type="tel" placeholder="+7 999 123-45-67" autocomplete="tel" required value="${escapeHtml(state.phone || "")}"></label><button class="submit">Получить SMS-код</button></form>`
         : `<div class="callout success">Учебный код: <strong>123456</strong><br><small>Действует 5 минут. SMS не отправляется.</small></div><form id="code-form"><label>Код из SMS<input id="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" placeholder="6 цифр" required></label><button class="submit">${register ? "Зарегистрироваться" : "Войти"}</button></form><div class="actions"><button id="change-phone" class="link-button">Изменить телефон / запросить код заново</button></div>`
     }
     <div class="help">${register ? "Регистрация создаёт кабинет заявителя." : "Специалист входит по заранее созданному номеру."}<br>Условия сервиса соответствуют учебному заданию.</div></div></section></div>`;
@@ -154,7 +168,7 @@ function shell(content, active = "all") {
   root.innerHTML = `<div class="layout"><aside class="sidebar">${brand}<div class="eyebrow">${specialist ? "Рабочий кабинет" : "Личный кабинет"}</div>
     <nav><a href="#" class="${active === "all" ? "active" : ""}">${specialist ? "Очередь заявок" : "Мои заявки"}</a>${!specialist ? `<a href="#new" class="${active === "new" ? "active" : ""}">Подать заявку</a>` : ""}<a href="#completed" class="${active === "completed" ? "active" : ""}">Оказанные услуги</a></nav>
     <div class="side-foot">УЧЕБНЫЙ ПРОЕКТ<strong>Подготовка документов<br>для патента · Раздел 5</strong><br>Команда «ААА» · ПИС</div></aside>
-    <main class="main"><header class="topbar"><span>Подготовка документов для патента</span><div class="user"><span class="avatar">${specialist ? "С" : "З"}</span><span>${esc(state.user.phone)}<br><small>${specialist ? "Специалист по проверке комплекта" : "Заявитель"}</small></span><button id="logout" class="secondary">Выйти</button></div></header><div class="content">${content}</div></main></div>`;
+    <main class="main"><header class="topbar"><span>Подготовка документов для патента</span><div class="user"><span class="avatar">${specialist ? "С" : "З"}</span><span>${escapeHtml(state.user.phone)}<br><small>${specialist ? "Специалист по проверке комплекта" : "Заявитель"}</small></span><button id="logout" class="secondary">Выйти</button></div></header><div class="content">${content}</div></main></div>`;
   on("#logout", "click", async () => {
     await api("/logout", {});
     state.user = null;
@@ -180,7 +194,7 @@ async function dashboard(completed = false) {
     `<div class="page-head"><div><div class="eyebrow">${specialist ? "Проверка комплектов" : "Ваши документы"}</div><h1>${completed ? "Оказанные услуги" : specialist ? "Очередь заявок" : "Мои заявки"}</h1><p class="muted">${completed ? "Завершённые обращения и выданные заключения." : specialist ? "Проверьте документы и помогите заявителю собрать полный комплект." : "Все обращения, документы и результаты — в одном кабинете."}</p></div><button id="refresh" class="secondary">Обновить</button></div>
     ${!specialist && !completed ? `<section class="panel hero"><div class="eyebrow">Одна услуга · Три пункта</div><h2>Подготовьте комплект для патента</h2><p>Сертификат о знаниях, цветные фотографии и ИНН. Заполните анкету — мы подскажем, что нужно именно вам.</p><a class="button" href="#new">Начать подготовку <span>→</span></a><div class="steps"><div class="step"><b>01 / Заполните анкету</b>Определим перечень</div><div class="step"><b>02 / Приложите документы</b>Специалист проверит комплект</div><div class="step"><b>03 / Получите заключение</b>Результат сохранится в кабинете</div></div></section>` : ""}
     <div class="stats"><div class="stat"><b>${all.filter((a) => a.status !== "COMPLETED").length}</b><span>В работе</span></div><div class="stat"><b>${all.filter((a) => a.status === "NEEDS_SUPPLEMENT").length}</b><span>Требуют дополнения</span></div><div class="stat"><b>${all.filter((a) => a.status === "COMPLETED").length}</b><span>Завершены</span></div></div>
-    <section class="panel"><h2>${completed ? "Архив результатов" : specialist ? "Ожидают действий" : "Обращения"}</h2>${shown.length ? shown.map((a) => `<article class="list-item"><div><h3><a href="#application/${a.id}">Подготовка комплекта · № ${shortId(a.id)}</a></h3><div class="meta">Подана ${date(a.submittedAt)}${specialist ? " · " + esc(a.applicantPhone) : ""}</div></div><div class="right">${badge(a.status)}<a href="#application/${a.id}">Открыть →</a></div></article>`).join("") : `<div class="empty"><b>${completed ? "Завершённых услуг пока нет" : "Заявок пока нет"}</b><span class="muted">${specialist ? "Новые обращения появятся здесь после подачи." : completed ? "Выданное заключение появится здесь после проверки." : "Начните с анкеты: это займёт несколько минут."}</span></div>`}</section>`,
+    <section class="panel"><h2>${completed ? "Архив результатов" : specialist ? "Ожидают действий" : "Обращения"}</h2>${shown.length ? shown.map((a) => `<article class="list-item"><div><h3><a href="#application/${a.id}">Подготовка комплекта · № ${shortId(a.id)}</a></h3><div class="meta">Подана ${formatDate(a.submittedAt)}<br>${deadlineHtml(a)}${specialist ? " · " + escapeHtml(a.applicantPhone) : ""}</div></div><div class="right">${badge(a.status)}<a href="#application/${a.id}">Открыть →</a></div></article>`).join("") : `<div class="empty"><b>${completed ? "Завершённых услуг пока нет" : "Заявок пока нет"}</b><span class="muted">${specialist ? "Новые обращения появятся здесь после подачи." : completed ? "Выданное заключение появится здесь после проверки." : "Начните с анкеты: это займёт несколько минут."}</span></div>`}</section>`,
     completed ? "completed" : "all",
   );
   on("#refresh", "click", () => dashboard(completed));
@@ -192,7 +206,7 @@ function questionnaire(q = {}) {
     <label class="check"><input id="isResettlementParticipant" type="checkbox" ${q.isResettlementParticipant ? "checked" : ""}>Я участник программы переселения</label>
     <label class="check"><input id="hasLanguageDocument" type="checkbox" ${q.hasLanguageDocument ? "checked" : ""}>Есть документ, подтверждающий знание языка, истории и законодательства</label>
     <label class="check"><input id="hasInn" type="checkbox" ${q.hasInn ? "checked" : ""}>У меня уже есть ИНН</label>
-    <label id="inn-label" ${q.hasInn ? "" : "hidden"}>Номер ИНН<input id="inn" inputmode="numeric" maxlength="12" pattern="[0-9]{12}" value="${esc(q.inn || "")}" ${q.hasInn ? "required" : ""}><small>12 цифр. Отдельный файл ИНН не обязателен.</small></label></fieldset>`;
+    <label id="inn-label" ${q.hasInn ? "" : "hidden"}>Номер ИНН<input id="inn" inputmode="numeric" maxlength="12" pattern="[0-9]{12}" value="${escapeHtml(q.inn || "")}" ${q.hasInn ? "required" : ""}><small>12 цифр. Отдельный файл ИНН не обязателен.</small></label></fieldset>`;
 }
 
 function readQuestionnaire() {
@@ -213,13 +227,22 @@ function readQuestionnaire() {
 
 function uploads(version) {
   return `<fieldset><legend>Документы</legend><p class="muted">PDF, PNG или JPEG. До 5 МБ на файл, до 12 файлов и 15 МБ на версию. Недостающие документы можно предоставить после запроса специалиста.</p>
-  ${version && version.documents.length ? `<h3>Сохранить файлы предыдущей версии</h3>${version.documents.map((d) => `<label class="check"><input type="checkbox" name="keep" value="${d.id}" checked>${esc(d.code)} · ${esc(d.fileName)}</label>`).join("")}<hr>` : ""}
+  ${version && version.documents.length ? `<h3>Сохранить файлы предыдущей версии</h3>${version.documents.map((d) => `<label class="check"><input type="checkbox" name="keep" value="${d.id}" checked>${escapeHtml(d.code)} · ${escapeHtml(d.fileName)}</label>`).join("")}<hr>` : ""}
   ${Object.keys(titles)
     .map(
       (c) =>
         `<label>${c} · ${titles[c]}<input id="file-${c.replace(".", "")}" type="file" multiple accept=".pdf,.png,.jpg,.jpeg"><small>${c === "5.1" ? "Сертификат или имеющийся документ о знаниях." : c === "5.2" ? "Цветные фотографии формата 3 × 4 см." : "Необязательное вложение."}</small></label>`,
     )
     .join("")}</fieldset>`;
+}
+
+function readFileContent(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result.split(",")[1]);
+    reader.onerror = () => reject(new Error("Не удалось прочитать файл."));
+    reader.readAsDataURL(file);
+  });
 }
 
 class SupplementForm {
@@ -237,12 +260,7 @@ class SupplementForm {
       for (const file of files) {
         if (!file.size || file.size > 5 * 1024 * 1024)
           throw new Error("Файл пуст или больше 5 МБ: " + file.name);
-        const content = await new Promise((resolve, reject) => {
-          const r = new FileReader();
-          r.onload = () => resolve(r.result.split(",")[1]);
-          r.onerror = () => reject(new Error("Не удалось прочитать файл."));
-          r.readAsDataURL(file);
-        });
+        const content = await readFileContent(file);
         const kind =
           code === "5.1"
             ? questionnaire.hasLanguageDocument
@@ -293,9 +311,9 @@ function applicationForm(a = null) {
   const q = a ? a.latest.questionnaire : {};
   shell(
     `<div class="page-head"><div><div class="eyebrow">${a ? "Ответ специалисту" : "Новая услуга"}</div><h1>${a ? "Дополнить заявку" : "Подготовка комплекта"}</h1><p class="muted">${a ? "Новая версия сохранится вместе с предыдущими." : "Заполните анкету и приложите доступные документы."}</p></div><a href="${a ? "#application/" + a.id : "#"}">← Назад</a></div>
-    ${a ? `<div class="callout"><strong>Запрос специалиста</strong><br>${esc(a.request.instructions)}</div>` : ""}
+    ${a ? `<div class="callout"><strong>Запрос специалиста</strong><br>${escapeHtml(a.request.instructions)}</div>` : ""}
     <div class="grid"><form id="application-form"><section class="panel">${questionnaire(q)}<div class="actions"><button id="calculate" class="secondary" type="button">Показать индивидуальный перечень</button></div><div id="calculated" aria-live="polite"></div></section><section class="panel">${uploads(a?.latest)}<div class="actions"><button id="submit-application">${a ? "Отправить дополнение" : "Подать заявку"}</button><a href="${a ? "#application/" + a.id : "#"}">Отмена</a></div></section></form>
-    <aside><section class="panel aside-note"><div class="eyebrow">Как это работает</div><h3>Проверяем комплектность</h3><p>Специалист сопоставит сведения и файлы с вашим перечнем. При недостатках вы получите запрос дополнения.</p><h3>Результат услуги</h3><p>Заключение о комплектности документов. Выдача патента в услугу не входит.</p><h3>Учебные условия</h3><p>Раздел 5 для граждан пяти указанных стран без статуса ВКС и участника программы переселения.</p></section></aside></div>`,
+    <aside><section class="panel aside-note"><div class="eyebrow">Как это работает</div><h3>Срок исполнения</h3><p>Учебный срок — 3 календарных дня с подачи, включая время дополнения. Дополнение не переносит срок. Конкретная дата появится после подачи.</p><h3>Проверяем комплектность</h3><p>Специалист сопоставит сведения и файлы с вашим перечнем. При недостатках вы получите запрос дополнения.</p><h3>Результат услуги</h3><p>Заключение о комплектности документов. Выдача патента в услугу не входит.</p><h3>Учебные условия</h3><p>Раздел 5 для граждан пяти указанных стран без статуса ВКС и участника программы переселения.</p></section></aside></div>`,
     "new",
   );
   on("#hasInn", "change", () => {
@@ -321,15 +339,15 @@ function checklistHtml(items) {
   return items
     .map(
       (i) =>
-        `<div class="rule"><div class="rule-code">${esc(i.code)}</div><div><h3>${esc(i.requiredAction)}</h3><p>${esc(i.basis)}</p></div></div>`,
+        `<div class="rule"><div class="rule-code">${escapeHtml(i.code)}</div><div><h3>${escapeHtml(i.requiredAction)}</h3><p>${escapeHtml(i.basis)}</p></div></div>`,
     )
     .join("");
 }
 
 function versionHtml(v) {
   const q = v.questionnaire;
-  return `<dl class="facts"><div><dt>Гражданство</dt><dd>${esc(q.citizenship)}</dd></div><div><dt>ИНН</dt><dd>${q.hasInn ? esc(q.inn) : "Отсутствует"}</dd></div><div><dt>Документ о знаниях</dt><dd>${q.hasLanguageDocument ? "Есть" : "Нужно получить сертификат"}</dd></div><div><dt>Особые статусы</dt><dd>ВКС: ${q.isHighlyQualified ? "да" : "нет"} · Переселение: ${q.isResettlementParticipant ? "да" : "нет"}</dd></div></dl>
-    ${checklistHtml(v.checklist)}<h3 class="actions">Приложенные документы</h3>${v.documents.length ? v.documents.map((d) => `<div class="file"><span class="rule-code">${esc(d.code)}</span><div><a href="/api/documents/${d.id}">${esc(d.fileName)}</a><br><small>${esc(d.kind)} · ${Math.ceil(d.size / 1024)} КБ</small></div></div>`).join("") : '<p class="muted">Файлы пока не приложены.</p>'}`;
+  return `<dl class="facts"><div><dt>Гражданство</dt><dd>${escapeHtml(q.citizenship)}</dd></div><div><dt>ИНН</dt><dd>${q.hasInn ? escapeHtml(q.inn) : "Отсутствует"}</dd></div><div><dt>Документ о знаниях</dt><dd>${q.hasLanguageDocument ? "Есть" : "Нужно получить сертификат"}</dd></div><div><dt>Особые статусы</dt><dd>ВКС: ${q.isHighlyQualified ? "да" : "нет"} · Переселение: ${q.isResettlementParticipant ? "да" : "нет"}</dd></div></dl>
+    ${checklistHtml(v.checklist)}<h3 class="actions">Приложенные документы</h3>${v.documents.length ? v.documents.map((d) => `<div class="file"><span class="rule-code">${escapeHtml(d.code)}</span><div><a href="/api/documents/${d.id}">${escapeHtml(d.fileName)}</a><br><small>${escapeHtml(d.kind)} · ${Math.ceil(d.size / 1024)} КБ</small></div></div>`).join("") : '<p class="muted">Файлы пока не приложены.</p>'}`;
 }
 
 function reviewHtml(a) {
@@ -340,37 +358,61 @@ function reviewHtml(a) {
     ${Object.keys(titles)
       .map((code) => {
         const f = r.findings.find((f) => f.code === code) || {};
-        return `<div class="finding"><h3>${code} · ${titles[code]}</h3><div class="columns"><label>Оценка<select name="assessment-${code}"><option value="">Не оценено</option><option value="CONFORMS" ${f.assessment === "CONFORMS" ? "selected" : ""}>Соответствует</option><option value="NEEDS_CORRECTION" ${f.assessment === "NEEDS_CORRECTION" ? "selected" : ""}>Требует исправления</option></select></label><label>Комментарий<textarea name="comment-${code}" maxlength="2000" placeholder="Опишите недостаток или подтвердите соответствие">${esc(f.comment || "")}</textarea></label></div></div>`;
+        return `<div class="finding"><h3>${code} · ${titles[code]}</h3><div class="columns"><label>Оценка<select name="assessment-${code}"><option value="">Не оценено</option><option value="CONFORMS" ${f.assessment === "CONFORMS" ? "selected" : ""}>Соответствует</option><option value="NEEDS_CORRECTION" ${f.assessment === "NEEDS_CORRECTION" ? "selected" : ""}>Требует исправления</option></select></label><label>Комментарий<textarea name="comment-${code}" maxlength="2000" placeholder="Опишите недостаток или подтвердите соответствие">${escapeHtml(f.comment || "")}</textarea></label></div></div>`;
       })
       .join("")}
     <div class="actions"><button>Сохранить оценки</button><small>Статус останется «На проверке»</small></div></form></section>
     <section class="panel"><h2>Решение специалиста</h2><p class="muted">Решение использует последние сохранённые оценки. Сначала сохраните изменения выше.</p><form id="decision-form"><label>Инструкции или текст заключения<textarea id="decision-text" required maxlength="4000" placeholder="Укажите, что исправить, или сформулируйте заключение о комплектности"></textarea></label><div class="actions"><button name="decision" value="request" class="danger">Запросить дополнение</button><button name="decision" value="complete">Выдать заключение</button></div></form></section>`;
 }
 
+function archivedReviewHtml(review) {
+  const findings = review.findings
+    .map(
+      (finding) => `<p class="preserve">
+      <strong>${escapeHtml(finding.code)} · ${assessmentLabel(finding.assessment)}</strong><br>${escapeHtml(finding.comment)}</p>`,
+    )
+    .join("");
+  const request = review.request
+    ? `<div class="callout"><strong>Запрос дополнения</strong><br>${escapeHtml(review.request.instructions)}</div>`
+    : "";
+  return `<h3 class="actions">Проверка · ${escapeHtml(review.specialistPhone)}</h3>${findings}${request}`;
+}
+
+function previousVersionsHtml(versions) {
+  if (versions.length < 2) return "";
+  const items = versions
+    .slice(0, -1)
+    .reverse()
+    .map(
+      (version) => `
+    <details>
+      <summary>Версия ${version.number} · ${formatDate(version.submittedAt)}</summary><br>
+      ${versionHtml(version)}
+      ${version.reviews.map(archivedReviewHtml).join("")}
+    </details>`,
+    )
+    .join("");
+  return `<section class="panel"><h2>Предыдущие версии</h2>${items}</section>`;
+}
+
+function assessmentLabel(assessment) {
+  return assessment === "CONFORMS" ? "Соответствует" : "Требует исправления";
+}
+
 async function applicationDetail(id) {
   const a = await api("/applications/" + id);
   const specialist = state.user.role === "SPECIALIST";
   const assessments = a.latest.reviews.flatMap((r) => r.findings);
-  shell(`<div class="page-head"><div><div class="eyebrow">Заявка № ${shortId(a.id)}</div><h1>Подготовка комплекта</h1><p class="muted">Подана ${date(a.submittedAt)}${specialist ? " · " + esc(a.applicantPhone) : ""}</p></div>${badge(a.status)}</div>
-    ${a.status === "NEEDS_SUPPLEMENT" ? `<div class="callout"><strong>Требуется дополнение</strong><p>${esc(a.request.instructions)}</p>${!specialist ? `<a class="button" href="#supplement/${a.id}">Дополнить заявку →</a>` : ""}</div>` : ""}
-    ${a.conclusion ? `<div class="callout success"><div class="eyebrow">Услуга завершена</div><h2>Заключение о комплектности</h2><p>${esc(a.conclusion.conclusionText)}</p><small>Выдано ${date(a.conclusion.issuedAt)} · № ${shortId(a.conclusion.id)} · Версия ${a.latest.number}</small></div>` : ""}
+  shell(`<div class="page-head"><div><div class="eyebrow">Заявка № ${shortId(a.id)}</div><h1>Подготовка комплекта</h1><p class="muted">Подана ${formatDate(a.submittedAt)}<br>${deadlineHtml(a)}${specialist ? " · " + escapeHtml(a.applicantPhone) : ""}</p></div>${badge(a.status)}</div>
+    ${a.status === "NEEDS_SUPPLEMENT" ? `<div class="callout"><strong>Требуется дополнение</strong><p>${escapeHtml(a.request.instructions)}</p>${!specialist ? `<a class="button" href="#supplement/${a.id}">Дополнить заявку →</a>` : ""}</div>` : ""}
+    ${a.conclusion ? `<div class="callout success"><div class="eyebrow">Услуга завершена</div><h2>Заключение о комплектности</h2><p>${escapeHtml(a.conclusion.conclusionText)}</p><small>Выдано ${formatDate(a.conclusion.issuedAt)} · № ${shortId(a.conclusion.id)} · Версия ${a.latest.number}</small></div>` : ""}
+    <p class="muted">Учебный срок — 3 календарных дня с подачи заявки, включая время дополнения. Дополнение не переносит срок. Время — Екатеринбург (UTC+5).</p>
     <div class="grid"><div><section class="panel"><div class="version-head"><h2>Анкета и документы</h2><span class="badge">Версия ${a.latest.number}</span></div>${versionHtml(a.latest)}</section>
     ${specialist && a.status === "SUBMITTED" ? '<section class="panel"><h2>Начните проверку</h2><p class="muted">Заявка будет закреплена за вами до решения по этой версии.</p><button id="start-review">Начать проверку</button></section>' : ""}
     ${specialist ? reviewHtml(a) : ""}
-    ${assessments.length ? `<section class="panel"><h2>Сохранённые оценки</h2>${assessments.map((f) => `<div class="finding"><strong>${esc(f.code)} · ${f.assessment === "CONFORMS" ? "Соответствует" : "Требует исправления"}</strong><p class="preserve muted">${esc(f.comment || "Без комментария")}</p></div>`).join("")}</section>` : ""}
-    ${
-      a.versions.length > 1
-        ? `<section class="panel"><h2>Предыдущие версии</h2>${a.versions
-            .slice(0, -1)
-            .reverse()
-            .map(
-              (v) =>
-                `<details><summary>Версия ${v.number} · ${date(v.submittedAt)}</summary><br>${versionHtml(v)}${v.reviews.map((r) => `<h3 class="actions">Проверка · ${esc(r.specialistPhone)}</h3>${r.findings.map((f) => `<p class="preserve"><strong>${esc(f.code)} · ${f.assessment === "CONFORMS" ? "Соответствует" : "Требует исправления"}</strong><br>${esc(f.comment)}</p>`).join("")}${r.request ? `<div class="callout"><strong>Запрос дополнения</strong><br>${esc(r.request.instructions)}</div>` : ""}`).join("")}</details>`,
-            )
-            .join("")}</section>`
-        : ""
-    }</div>
-    <aside><section class="panel"><h2>История статусов</h2><ol class="timeline">${a.history.map((e) => `<li><b>${esc(statuses[e.newStatus])}</b><small>${date(e.occurredAt)}<br>${e.actorRole === "SPECIALIST" ? "Специалист" : "Заявитель"} · ${esc(e.actorPhone)}</small><p>${esc(e.comment)}</p></li>`).join("")}</ol></section><button id="refresh-detail" class="secondary">Обновить заявку</button></aside></div>`);
+    ${assessments.length ? `<section class="panel"><h2>Сохранённые оценки</h2>${assessments.map((f) => `<div class="finding"><strong>${escapeHtml(f.code)} · ${assessmentLabel(f.assessment)}</strong><p class="preserve muted">${escapeHtml(f.comment || "Без комментария")}</p></div>`).join("")}</section>` : ""}
+    ${previousVersionsHtml(a.versions)}</div>
+    <aside><section class="panel"><h2>История статусов</h2><ol class="timeline">${a.history.map((e) => `<li><b>${escapeHtml(statuses[e.newStatus])}</b><small>${formatDate(e.occurredAt)}<br>${e.actorRole === "SPECIALIST" ? "Специалист" : "Заявитель"} · ${escapeHtml(e.actorPhone)}</small><p>${escapeHtml(e.comment)}</p></li>`).join("")}</ol></section><button id="refresh-detail" class="secondary">Обновить заявку</button></aside></div>`);
   const command = () => ({
     sourceVersionId: a.latest.id,
     revision: a.review?.revision,
@@ -430,7 +472,7 @@ async function route() {
     if (state.user)
       shell(
         '<section class="panel"><h1>Не удалось открыть страницу</h1><p>' +
-          esc(error.message) +
+          escapeHtml(error.message) +
           '</p><a href="#">К списку заявок →</a></section>',
       );
     notify(error.message);
@@ -443,7 +485,7 @@ async function bootstrap() {
     state.user = data.user;
     state.csrf = data.csrf;
     await route();
-  } catch (error) {
+  } catch {
     state.user = null;
     authScreen();
   }

@@ -4,15 +4,24 @@ import base64
 import binascii
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
+PROCESSING_DAYS = 3
 
-def uid():
+
+def processing_deadline(submitted_at: str) -> str:
+    """Educational deadline: calendar days, without pauses or extensions."""
+    return (
+        datetime.fromisoformat(submitted_at) + timedelta(days=PROCESSING_DAYS)
+    ).isoformat(timespec="seconds")
+
+
+def uid() -> str:
     return str(uuid4())
 
 
-def now():
+def now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
@@ -27,7 +36,7 @@ def require(condition, message, status=400):
         raise DomainError(message, status)
 
 
-def text(value, label, limit=4000, required=True):
+def text(value, label: str, limit: int = 4000, required: bool = True) -> str:
     require(isinstance(value, str), f"{label}: ожидается текст.")
     value = value.strip()
     require(
@@ -59,33 +68,43 @@ KINDS = {
 @dataclass(frozen=True)
 class Questionnaire:
     citizenship: str
-    isHighlyQualified: bool
-    isResettlementParticipant: bool
-    hasLanguageDocument: bool
-    hasInn: bool
+    is_highly_qualified: bool
+    is_resettlement_participant: bool
+    has_language_document: bool
+    has_inn: bool
     inn: str
+
+    def to_payload(self) -> dict:
+        """Keep the browser and stored JSON format independent of Python names."""
+        return {
+            "citizenship": self.citizenship,
+            "isHighlyQualified": self.is_highly_qualified,
+            "isResettlementParticipant": self.is_resettlement_participant,
+            "hasLanguageDocument": self.has_language_document,
+            "hasInn": self.has_inn,
+            "inn": self.inn,
+        }
 
 
 class ChecklistPolicy:
-    def calculate(self, questionnaire):
-        q = questionnaire
+    def calculate(self, questionnaire: Questionnaire) -> list[dict]:
         require(
-            q.citizenship in COUNTRIES
-            and not q.isHighlyQualified
-            and not q.isResettlementParticipant,
+            questionnaire.citizenship in COUNTRIES
+            and not questionnaire.is_highly_qualified
+            and not questionnaire.is_resettlement_participant,
             "По учебным условиям раздела 5 услуга применима к гражданам Азербайджана, "
             "Таджикистана, Узбекистана, Молдовы или Украины без двух особых статусов.",
         )
         actions = [
             (
                 "Приложить имеющийся документ о знаниях"
-                if q.hasLanguageDocument
+                if questionnaire.has_language_document
                 else "Получить и приложить сертификат о знаниях"
             ),
             "Приложить цветные фотографии 3 × 4 см",
             (
                 "Указать имеющийся ИНН"
-                if q.hasInn
+                if questionnaire.has_inn
                 else "Получить ИНН и сообщить номер в дополнении"
             ),
         ]
@@ -93,24 +112,26 @@ class ChecklistPolicy:
             "Русский язык, история и основы законодательства России; "
             + (
                 "имеющийся подтверждающий документ."
-                if q.hasLanguageDocument
+                if questionnaire.has_language_document
                 else "документ отсутствует."
             ),
             "Цветные фотографии для заявления на патент.",
             (
                 "ИНН указан в анкете; отдельный файл не обязателен."
-                if q.hasInn
+                if questionnaire.has_inn
                 else "ИНН отсутствует. Получение в территориальном органе ФНС вне сервиса."
             ),
         ]
         return [
-            dict(code=c, requiredAction=a, basis=b)
-            for c, a, b in zip(CODES, actions, bases)
+            dict(code=code, requiredAction=action, basis=basis)
+            for code, action, basis in zip(CODES, actions, bases)
         ]
 
 
 class SupplementValidator:
     MAX_FILE = 5 * 1024 * 1024
+    MAX_FILES = 12
+    MAX_TOTAL_SIZE = 15 * 1024 * 1024
 
     def validate(self, command, context=None):
         require(isinstance(command, dict), "Ожидается объект заявления.")
@@ -123,7 +144,7 @@ class SupplementValidator:
             "hasInn",
         )
         require(
-            all(type(raw.get(f)) is bool for f in flags),
+            all(type(raw.get(flag)) is bool for flag in flags),
             "Заполните все признаки анкеты.",
         )
         country = text(raw.get("citizenship"), "Гражданство", 80)
@@ -133,7 +154,7 @@ class SupplementValidator:
             "ИНН физического лица должен содержать 12 цифр.",
         )
         require(raw["hasInn"] or not inn, "Уберите номер ИНН или отметьте его наличие.")
-        q = Questionnaire(country, *(raw[f] for f in flags), inn)
+        questionnaire = Questionnaire(country, *(raw[flag] for flag in flags), inn)
         selected = command.get("selectedDocumentIds", [])
         new = command.get("newDocuments", [])
         require(
@@ -147,73 +168,69 @@ class SupplementValidator:
             "Выбранный файл не принадлежит исходной версии.",
         )
         require(
-            isinstance(new, list) and len(new) + len(selected) <= 12,
+            isinstance(new, list) and len(new) + len(selected) <= self.MAX_FILES,
             "В версии допускается до 12 файлов.",
         )
         documents = [dict(previous[i]) for i in selected]
-        for item in new:
-            require(isinstance(item, dict), "Некорректный файл.")
-            code = item.get("code")
-            require(
-                code in CODES
-                and isinstance(item.get("kind"), str)
-                and item.get("kind") in KINDS[code],
-                "Проверьте пункт и тип документа.",
-            )
-            name = text(item.get("fileName"), "Имя файла", 160)
-            require(
-                not any(c in name for c in "/\\\r\n\x00"), "Недопустимое имя файла."
-            )
-            encoded = item.get("content")
-            require(
-                isinstance(encoded, str) and len(encoded) <= 7 * 1024 * 1024,
-                "Файл слишком велик (максимум 5 МБ).",
-            )
-            try:
-                content = base64.b64decode(encoded, validate=True)
-            except (ValueError, binascii.Error):
-                raise DomainError("Не удалось прочитать файл.") from None
-            require(0 < len(content) <= self.MAX_FILE, "Файл пуст или больше 5 МБ.")
-            formats = {
-                "application/pdf": (".pdf", content.startswith(b"%PDF-")),
-                "image/png": (".png", content.startswith(b"\x89PNG\r\n\x1a\n")),
-                "image/jpeg": ((".jpg", ".jpeg"), content.startswith(b"\xff\xd8\xff")),
-            }
-            mime = item.get("mediaType")
-            require(
-                isinstance(mime, str) and mime in formats, "Разрешены PDF, PNG и JPEG."
-            )
-            extension, valid = formats[mime]
-            require(
-                name.lower().endswith(extension) and valid,
-                "Содержимое файла не соответствует формату.",
-            )
-            documents.append(
-                dict(
-                    code=code,
-                    kind=item["kind"],
-                    fileName=name,
-                    mediaType=mime,
-                    content=content,
-                )
-            )
+        documents.extend(self.validate_document(item) for item in new)
         require(
-            sum(len(d["content"]) for d in documents) <= 15 * 1024 * 1024,
+            sum(len(d["content"]) for d in documents) <= self.MAX_TOTAL_SIZE,
             "Общий размер файлов версии — до 15 МБ.",
         )
-        return q, documents
+        return questionnaire, documents
+
+    def validate_document(self, item: dict) -> dict:
+        """Validate one upload before it enters an immutable version."""
+        require(isinstance(item, dict), "Некорректный файл.")
+        code = item.get("code")
+        require(
+            code in CODES
+            and isinstance(item.get("kind"), str)
+            and item.get("kind") in KINDS[code],
+            "Проверьте пункт и тип документа.",
+        )
+        name = text(item.get("fileName"), "Имя файла", 160)
+        require(
+            not any(character in name for character in "/\\\r\n\x00"),
+            "Недопустимое имя файла.",
+        )
+        encoded = item.get("content")
+        require(
+            isinstance(encoded, str) and len(encoded) <= 7 * 1024 * 1024,
+            "Файл слишком велик (максимум 5 МБ).",
+        )
+        try:
+            content = base64.b64decode(encoded, validate=True)
+        except (ValueError, binascii.Error):
+            raise DomainError("Не удалось прочитать файл.") from None
+        require(0 < len(content) <= self.MAX_FILE, "Файл пуст или больше 5 МБ.")
+        formats = {
+            "application/pdf": (".pdf", content.startswith(b"%PDF-")),
+            "image/png": (".png", content.startswith(b"\x89PNG\r\n\x1a\n")),
+            "image/jpeg": ((".jpg", ".jpeg"), content.startswith(b"\xff\xd8\xff")),
+        }
+        mime = item.get("mediaType")
+        require(isinstance(mime, str) and mime in formats, "Разрешены PDF, PNG и JPEG.")
+        extension, valid = formats[mime]
+        require(
+            name.lower().endswith(extension) and valid,
+            "Содержимое файла не соответствует формату.",
+        )
+        return dict(
+            code=code, kind=item["kind"], fileName=name, mediaType=mime, content=content
+        )
 
 
 @dataclass
 class ChangeSet:
-    applicationId: str
-    actorId: str
+    application_id: str
+    actor_id: str
     status: str | None = None
     comment: str = ""
     version: dict | None = None
     review: dict | None = None
     decision: dict | None = None
-    applicantId: str | None = None
+    applicant_id: str | None = None
 
 
 @dataclass
@@ -226,38 +243,43 @@ class Review:
             "Оцените до трёх пунктов.",
         )
         result = []
-        for f in findings:
+        for finding in findings:
             require(
-                isinstance(f, dict) and f.get("code") in CODES,
+                isinstance(finding, dict) and finding.get("code") in CODES,
                 "Неизвестный пункт оценки.",
             )
             require(
-                f.get("assessment") in ("CONFORMS", "NEEDS_CORRECTION"),
+                finding.get("assessment") in ("CONFORMS", "NEEDS_CORRECTION"),
                 "Выберите оценку пункта.",
             )
             comment = text(
-                f.get("comment", ""),
+                finding.get("comment", ""),
                 "Комментарий",
                 2000,
-                f["assessment"] == "NEEDS_CORRECTION",
+                finding["assessment"] == "NEEDS_CORRECTION",
             )
             result.append(
-                dict(code=f["code"], assessment=f["assessment"], comment=comment)
+                dict(
+                    code=finding["code"],
+                    assessment=finding["assessment"],
+                    comment=comment,
+                )
             )
         require(
-            len({f["code"] for f in result}) == len(result),
+            len({finding["code"] for finding in result}) == len(result),
             "Повторяющиеся пункты оценки.",
         )
         return result
 
-    def canRequestSupplement(self):
+    def can_request_supplement(self):
         return len(self.data["findings"]) == 3 and any(
-            f["assessment"] == "NEEDS_CORRECTION" for f in self.data["findings"]
+            finding["assessment"] == "NEEDS_CORRECTION"
+            for finding in self.data["findings"]
         )
 
-    def canComplete(self):
+    def can_complete(self):
         return len(self.data["findings"]) == 3 and all(
-            f["assessment"] == "CONFORMS" for f in self.data["findings"]
+            finding["assessment"] == "CONFORMS" for finding in self.data["findings"]
         )
 
 
@@ -266,13 +288,13 @@ class Application:
     data: dict
 
     @staticmethod
-    def submit(applicantId, questionnaire, checklist, documents):
+    def submit(applicant_id, questionnaire, checklist, documents):
         return ChangeSet(
             uid(),
-            applicantId,
+            applicant_id,
             "SUBMITTED",
             "Заявка принята",
-            applicantId=applicantId,
+            applicant_id=applicant_id,
             version=dict(
                 questionnaire=questionnaire,
                 checklist=checklist,
@@ -282,101 +304,101 @@ class Application:
             ),
         )
 
-    def acceptSupplement(
-        self, applicantId, command, questionnaire, checklist, documents
+    def accept_supplement(
+        self, applicant_id, command, questionnaire, checklist, documents
     ):
-        a = self.data
-        require(a["applicantId"] == applicantId, "Заявка не найдена.", 404)
+        application = self.data
+        require(application["applicantId"] == applicant_id, "Заявка не найдена.", 404)
         require(
-            a["status"] == "NEEDS_SUPPLEMENT"
-            and command.get("sourceVersionId") == a["latest"]["id"]
-            and a["request"]
-            and command.get("requestId") == a["request"]["id"],
+            application["status"] == "NEEDS_SUPPLEMENT"
+            and command.get("sourceVersionId") == application["latest"]["id"]
+            and application["request"]
+            and command.get("requestId") == application["request"]["id"],
             "Заявка изменилась. Откройте её заново и проверьте принятую версию.",
             409,
         )
         return ChangeSet(
-            a["id"],
-            applicantId,
+            application["id"],
+            applicant_id,
             "SUBMITTED",
             "Принято дополнение",
             version=dict(
                 questionnaire=questionnaire,
                 checklist=checklist,
                 documents=documents,
-                number=a["latest"]["number"] + 1,
-                requestId=a["request"]["id"],
+                number=application["latest"]["number"] + 1,
+                requestId=application["request"]["id"],
             ),
         )
 
-    def startReview(self, specialistId, versionId):
+    def start_review(self, specialist_id, version_id):
         require(
             self.data["status"] == "SUBMITTED"
-            and self.data["latest"]["id"] == versionId,
+            and self.data["latest"]["id"] == version_id,
             "Эту версию уже проверяют или заявка изменилась. Обновите страницу.",
             409,
         )
         return ChangeSet(
             self.data["id"],
-            specialistId,
+            specialist_id,
             "UNDER_REVIEW",
             "Специалист начал проверку",
             review=dict(
-                id=uid(), versionId=versionId, specialistId=specialistId, state="OPEN"
+                id=uid(), versionId=version_id, specialistId=specialist_id, state="OPEN"
             ),
         )
 
-    def activeReview(self, specialistId, command):
-        r = self.data["review"]
+    def active_review(self, specialist_id, command):
+        review = self.data["review"]
         require(
             self.data["status"] == "UNDER_REVIEW"
-            and r
-            and r["specialistId"] == specialistId,
+            and review
+            and review["specialistId"] == specialist_id,
             "Проверка недоступна этому специалисту.",
             409,
         )
         require(
             command.get("sourceVersionId") == self.data["latest"]["id"]
-            and command.get("revision") == r["revision"],
+            and command.get("revision") == review["revision"],
             "Оценка изменилась. Обновите заявку перед продолжением.",
             409,
         )
-        return Review(r)
+        return Review(review)
 
-    def saveAssessment(self, specialistId, command):
-        review = self.activeReview(specialistId, command)
+    def save_assessment(self, specialist_id, command):
+        review = self.active_review(specialist_id, command)
         findings = review.assess(command.get("findings"))
         return ChangeSet(
             self.data["id"],
-            specialistId,
+            specialist_id,
             review=dict(review.data, findings=findings, state="ASSESSED"),
         )
 
-    def requestSupplement(self, specialistId, command):
-        review = self.activeReview(specialistId, command)
+    def request_supplement(self, specialist_id, command):
+        review = self.active_review(specialist_id, command)
         require(
-            review.canRequestSupplement(),
+            review.can_request_supplement(),
             "Сначала сохраните оценки всех трёх пунктов с хотя бы одним недостатком.",
         )
         instructions = text(command.get("text"), "Инструкции по дополнению")
         return ChangeSet(
             self.data["id"],
-            specialistId,
+            specialist_id,
             "NEEDS_SUPPLEMENT",
             instructions,
             review=dict(review.data, state="SUPPLEMENT_REQUESTED"),
             decision=dict(kind="request", text=instructions),
         )
 
-    def complete(self, specialistId, command):
-        review = self.activeReview(specialistId, command)
+    def complete(self, specialist_id, command):
+        review = self.active_review(specialist_id, command)
         require(
-            review.canComplete(), "Сначала сохраните соответствие всех трёх пунктов."
+            review.can_complete(), "Сначала сохраните соответствие всех трёх пунктов."
         )
         conclusion = text(command.get("text"), "Заключение")
         return ChangeSet(
             self.data["id"],
-            specialistId,
+            specialist_id,
             "COMPLETED",
             "Выдано заключение о комплектности",
             review=dict(review.data, state="COMPLETED"),

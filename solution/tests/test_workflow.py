@@ -3,6 +3,7 @@
 import base64
 import concurrent.futures
 from contextlib import closing
+from datetime import datetime, timedelta
 import http.cookiejar
 import json
 import sqlite3
@@ -114,6 +115,25 @@ class WorkflowTest(unittest.TestCase):
         status, data = (client or self.applicant).call("/applications/" + app_id)
         self.assertEqual(status, 200, data)
         return data
+
+    def test_processing_deadline(self):
+        app_id = self.submit()
+        application = self.view(app_id)
+        expected = (
+            datetime.fromisoformat(application["submittedAt"]) + timedelta(days=3)
+        ).isoformat(timespec="seconds")
+        self.assertEqual(application["dueAt"], expected)
+        self.assertEqual(self.view(app_id, self.specialist)["dueAt"], expected)
+        for client in (self.applicant, self.specialist):
+            status, data = client.call("/applications")
+            self.assertEqual(status, 200)
+            self.assertEqual(data["applications"][0]["dueAt"], expected)
+        application = self.request_supplement(app_id)
+        status, result = self.applicant.call(
+            f"/applications/{app_id}/supplement", self.supplement_command(application)
+        )
+        self.assertEqual(status, 200, result)
+        self.assertEqual(self.view(app_id)["dueAt"], expected)
 
     def review_command(self, a):
         return dict(

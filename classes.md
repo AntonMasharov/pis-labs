@@ -12,8 +12,8 @@ classDiagram
     class SessionService {
         +register(phone, code) AuthResult
         +login(phone, code) AuthResult
-        +requireApplicant(sessionToken) AuthResult
-        +requireSpecialist(sessionToken) AuthResult
+        +require_applicant(sessionToken) AuthResult
+        +require_specialist(sessionToken) AuthResult
     }
     class Session {
         -String tokenHash
@@ -25,10 +25,10 @@ classDiagram
         -ApplicationStatus currentStatus
         -DateTime submittedAt
         +submit(applicantId, command, checklist) ChangeSet
-        +acceptSupplement(applicantId, command, checklist) ChangeSet
-        +startReview(specialistId) ChangeSet
-        +saveAssessment(specialistId, findings) ChangeSet
-        +requestSupplement(specialistId, instructions) ChangeSet
+        +accept_supplement(applicantId, command, checklist) ChangeSet
+        +start_review(specialistId) ChangeSet
+        +save_assessment(specialistId, findings) ChangeSet
+        +request_supplement(specialistId, instructions) ChangeSet
         +complete(specialistId, conclusionText) ChangeSet
     }
     class ApplicationVersion {
@@ -64,8 +64,8 @@ classDiagram
         -DateTime startedAt
         -DateTime assessedAt
         +assess(findings) ValidationResult
-        +canRequestSupplement() Boolean
-        +canComplete() Boolean
+        +can_request_supplement() Boolean
+        +can_complete() Boolean
     }
     class Finding {
         -UUID findingId
@@ -134,25 +134,25 @@ classDiagram
         +StatusEvent newEvent
     }
     class ApplicationRepository {
-        +loadSupplementContext(applicationId, applicantId) ContextResult
-        +beginAndLock(applicationId, applicantId) LockResult
-        +beginAndLockForReview(applicationId, specialistId) LockResult
+        +load_supplement_context(applicationId, applicantId) ContextResult
+        +begin_and_lock(applicationId, applicantId) LockResult
+        +begin_and_lock_for_review(applicationId, specialistId) LockResult
         +save(changeSet) SaveResult
         +commit() CommitResult
         +rollback() void
-        +rollbackIfActive() void
+        +rollback_if_active() void
     }
     class SubmissionService {
         +submit(applicantId, command) SubmitResult
     }
     class ReviewService {
         +start(specialistId, applicationId) ReviewResult
-        +saveAssessment(specialistId, applicationId, findings) ReviewResult
-        +requestSupplement(specialistId, applicationId, instructions) ReviewResult
+        +save_assessment(specialistId, applicationId, findings) ReviewResult
+        +request_supplement(specialistId, applicationId, instructions) ReviewResult
         +complete(specialistId, applicationId, conclusionText) ReviewResult
     }
     class ApplicationQueryService {
-        +getOwnApplication(applicantId, applicationId) ApplicationView
+        +get_own_application(applicantId, applicationId) ApplicationView
         +listCompleted(applicantId) ApplicationView[]
         +listPending(specialistId) ApplicationView[]
     }
@@ -201,12 +201,12 @@ classDiagram
     SessionService ..> Session
     SupplementForm ..> SupplementController : submit
     SupplementForm ..> SupplementCommand
-    SupplementController ..> SessionService : requireApplicant
+    SupplementController ..> SessionService : require_applicant
     SupplementController ..> SupplementService : submit
     SupplementService ..> ApplicationRepository
     SupplementService ..> SupplementValidator
     SupplementService ..> ChecklistPolicy
-    SupplementService ..> Application : acceptSupplement
+    SupplementService ..> Application : accept_supplement
     SupplementService ..> SupplementCommand
     SupplementValidator ..> SupplementContext
     SupplementValidator ..> SupplementCommand
@@ -249,7 +249,7 @@ classDiagram
 | `ApplicationVersion`, `Questionnaire`, `ChecklistItem`, `Document` | Неизменяемая принятая версия анкеты, три пункта перечня и файлы. При дополнении выбранные старые файлы копируются в новую версию с новыми идентификаторами и привязкой к её пунктам. |
 | `Review`, `Finding`, `SupplementRequest`, `Conclusion` | Проверка одной версии одним специалистом, оценки её пунктов и один из двух возможных исходов. `Review` проверяет полноту и содержание оценок; `Application` дополнительно проверяет состояние всей заявки. |
 | `StatusEvent` | Неизменяемый переход состояния с порядковым номером, датой, инициатором и комментарием. |
-| `SupplementForm`, `SupplementController` | Форма собирает команду и показывает ответ. Контроллер проверяет сеанс через `requireApplicant` и передаёт сервису установленного заявителя. |
+| `SupplementForm`, `SupplementController` | Форма собирает команду и показывает ответ. Контроллер проверяет сеанс через `require_applicant` и передаёт сервису установленного заявителя. |
 | `SupplementService`, `SupplementValidator`, `ChecklistPolicy` | Координация дополнения, формальная проверка данных и расчёт применимости/перечня. Отсутствие документа допускается; оценка комплектности относится к специалисту. |
 | `ApplicationRepository` | Чтение из БД, проверка доступа при загрузке, блокировка и атомарная запись набора изменений. Один экземпляр на операцию использует одну транзакцию и соединение. |
 | `SubmissionService`, `ReviewService`, `ApplicationQueryService` | Первичная подача; действия специалиста; чтение своих заявок, перечня, истории, результата и завершённых услуг, а также очереди специалиста. |
@@ -258,7 +258,7 @@ classDiagram
 
 ## Контракты и соответствие lab04
 
-Имена всех восьми классов объектов [внутренней последовательности](class_sequence.md) и вызываемых там методов сохранены, включая `requireApplicant`, `loadSupplementContext`, `validate`, `calculate`, `beginAndLock`, `acceptSupplement`, `save`, `commit`, `rollback`, `rollbackIfActive`. `beginAndLock` возвращает актуальный `Application`; `loadSupplementContext` — снимок исходной версии с документами для предварительной проверки.
+Имена всех восьми классов объектов [внутренней последовательности](class_sequence.md) и вызываемых там методов сохранены, включая `require_applicant`, `load_supplement_context`, `validate`, `calculate`, `begin_and_lock`, `accept_supplement`, `save`, `commit`, `rollback`, `rollback_if_active`. `begin_and_lock` возвращает актуальный `Application`; `load_supplement_context` — снимок исходной версии с документами для предварительной проверки.
 
 `SupplementCommand` содержит те же данные, что `command` в lab04: заявку, исходную версию, запрос, исправленную анкету, выбранные прежние файлы и новые вложения с кодами пунктов. `NewDocument` — входные байты и метаданные, а `Document` — принятый неизменяемый файл с идентификатором и датой. Отправитель не может задавать владельца заявки через команду.
 
@@ -291,9 +291,13 @@ classDiagram
 3. Заявкой владеет заявитель, проверку выполняет специалист. На заявку допускается не более одной открытой проверки; работа ведётся только с последней версией. До решения у проверки может быть 0–3 оценки, перед решением — ровно три, по одной на каждый пункт.
 4. Запрос и заключение одной проверки взаимоисключающие. Запрос требует хотя бы одного недостатка и инструкций; заключение — соответствия всех пунктов. На всю заявку допускается только одно заключение. Закрытые проверки и принятые версии не перезаписываются.
 5. Первая версия не отвечает на запрос. Каждое дополнение отвечает ровно на один запрос проверки непосредственно предыдущей версии этой же заявки. У запроса не больше одного принятого ответа; изображённая связь `0..1 — 0..1` не выражает эти дополнительные условия сама по себе.
-6. `acceptSupplement` требует владельца, статус «Требует дополнения», совпадение исходной версии с последней и отсутствие ответа на запрос. Репозиторий проверяет доступ и держит блокировку до завершения транзакции. Все изменяющие операции используют одинаковую блокировку заявки; уникальны номер версии внутри заявки, ненулевая ссылка на запрос и номер события внутри заявки.
-7. Ошибка до фиксации откатывает открытую транзакцию. При неизвестном исходе commit нельзя обещать отсутствие записи: `rollbackIfActive` закрывает только оставшуюся транзакцию. Пользователь открывает заявку повторно и проверяет принятую версию. Частичное сохранение недопустимо.
+6. `accept_supplement` требует владельца, статус «Требует дополнения», совпадение исходной версии с последней и отсутствие ответа на запрос. Репозиторий проверяет доступ и держит блокировку до завершения транзакции. Все изменяющие операции используют одинаковую блокировку заявки; уникальны номер версии внутри заявки, ненулевая ссылка на запрос и номер события внутри заявки.
+7. Ошибка до фиксации откатывает открытую транзакцию. При неизвестном исходе commit нельзя обещать отсутствие записи: `rollback_if_active` закрывает только оставшуюся транзакцию. Пользователь открывает заявку повторно и проверяет принятую версию. Частичное сохранение недопустимо.
 
 ## Основания
 
 Формат lab05 — `classes.md`, один блок `classDiagram` с пояснениями — подтверждён по [README преподавателя](https://github.com/ekabardinsky/pis_2026_10/blob/master/README.md) и [labs.json](https://github.com/ekabardinsky/pis_2026_10/blob/master/labs.json) 27.10.2026. Классы и распределение ответственности — решения учебного проекта, согласованные с [прецедентами](use_case.md), [ER-моделью](er.md), [системной последовательностью](system_sequence.md) и [последовательностью классов](class_sequence.md). Эта работа фиксирует проект приложения; выбор стека и реализация относятся к lab06.
+
+Поля предметной модели в диаграмме соответствуют ключам JSON и столбцам БД (`camelCase`). В Python поля `Questionnaire` и `ChangeSet` используют `snake_case`; `Questionnaire.to_payload()` сохраняет исходные имена при сериализации. Названия реализованных операций приведены в стиле Python.
+
+Срок исполнения — вычисляемое значение `dueAt`: дата первоначальной подачи плюс 3 календарных дня. Оно доступно обеим ролям; дополнение не переносит срок. Длительность — условие учебной реализации, а не нормативный срок; требование показывать сроки сообщено пользователем по заметке со встречи с преподавателем.

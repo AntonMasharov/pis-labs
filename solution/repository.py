@@ -2,10 +2,9 @@
 
 import json
 import sqlite3
-from dataclasses import asdict
 from pathlib import Path
 
-from domain import Application, now, require, uid
+from domain import Application, ChangeSet, now, processing_deadline, require, uid
 
 
 class ApplicationRepository:
@@ -19,7 +18,7 @@ class ApplicationRepository:
         return self
 
     def __exit__(self, *args):
-        self.rollbackIfActive()
+        self.rollback_if_active()
         self.db.close()
 
     def initialize(self, specialist_phone):
@@ -39,7 +38,7 @@ class ApplicationRepository:
         return dict(row) if row else None
 
     def many(self, sql, params=()):
-        return [dict(r) for r in self.db.execute(sql, params).fetchall()]
+        return [dict(row) for row in self.db.execute(sql, params)]
 
     def begin(self):
         self.db.execute("BEGIN IMMEDIATE")
@@ -50,234 +49,264 @@ class ApplicationRepository:
     def rollback(self):
         self.db.rollback()
 
-    def rollbackIfActive(self):
+    def rollback_if_active(self):
         if self.db.in_transaction:
             self.rollback()
 
-    def permitted(self, applicationId, user):
-        a = self.one("SELECT * FROM applications WHERE id=?", (applicationId,))
+    def permitted(self, application_id, user):
+        application = self.one(
+            "SELECT * FROM applications WHERE id=?", (application_id,)
+        )
         require(
-            a and (user["role"] == "SPECIALIST" or a["applicantId"] == user["id"]),
+            application
+            and (
+                user["role"] == "SPECIALIST" or application["applicantId"] == user["id"]
+            ),
             "Заявка не найдена.",
             404,
         )
-        return a
+        application["dueAt"] = processing_deadline(application["submittedAt"])
+        return application
 
-    def version(self, versionId, content=False):
-        v = self.one("SELECT * FROM versions WHERE id=?", (versionId,))
-        v["questionnaire"] = json.loads(v["questionnaire"])
-        v["checklist"] = self.many(
+    def version(self, version_id, content=False):
+        version = self.one("SELECT * FROM versions WHERE id=?", (version_id,))
+        version["questionnaire"] = json.loads(version["questionnaire"])
+        version["checklist"] = self.many(
             "SELECT * FROM checklist_items WHERE versionId=? ORDER BY code",
-            (versionId,),
+            (version_id,),
         )
         fields = (
             "d.*"
             if content
             else "d.id,d.kind,d.fileName,d.mediaType,length(d.content) AS size,d.attachedAt"
         )
-        v["documents"] = self.many(
+        version["documents"] = self.many(
             f"SELECT {fields},i.code FROM documents d JOIN checklist_items i "
             "ON i.id=d.itemId WHERE d.versionId=? ORDER BY d.attachedAt,d.id",
-            (versionId,),
+            (version_id,),
         )
-        v["reviews"] = self.many(
+        version["reviews"] = self.many(
             "SELECT r.*,u.phone AS specialistPhone FROM reviews r JOIN users u "
             "ON u.id=r.specialistId WHERE versionId=? ORDER BY startedAt,id",
-            (versionId,),
+            (version_id,),
         )
-        for r in v["reviews"]:
-            r["findings"] = self.many(
+        for review in version["reviews"]:
+            review["findings"] = self.many(
                 "SELECT f.*,i.code FROM findings f JOIN checklist_items i "
                 "ON i.id=f.itemId WHERE reviewId=? ORDER BY i.code",
-                (r["id"],),
+                (review["id"],),
             )
-            r["request"] = self.one(
-                "SELECT * FROM supplement_requests WHERE reviewId=?", (r["id"],)
+            review["request"] = self.one(
+                "SELECT * FROM supplement_requests WHERE reviewId=?", (review["id"],)
             )
-            r["conclusion"] = self.one(
-                "SELECT * FROM conclusions WHERE reviewId=?", (r["id"],)
+            review["conclusion"] = self.one(
+                "SELECT * FROM conclusions WHERE reviewId=?", (review["id"],)
             )
-        return v
+        return version
 
-    def view(self, applicationId, user):
-        a = self.permitted(applicationId, user)
-        a["applicantPhone"] = self.one(
-            "SELECT phone FROM users WHERE id=?", (a["applicantId"],)
+    def view(self, application_id, user):
+        application = self.permitted(application_id, user)
+        application["applicantPhone"] = self.one(
+            "SELECT phone FROM users WHERE id=?", (application["applicantId"],)
         )["phone"]
-        a["versions"] = [
-            self.version(v["id"])
-            for v in self.many(
+        application["versions"] = [
+            self.version(version["id"])
+            for version in self.many(
                 "SELECT id FROM versions WHERE applicationId=? ORDER BY number",
-                (applicationId,),
+                (application_id,),
             )
         ]
-        a["latest"] = a["versions"][-1]
-        reviews = a["latest"]["reviews"]
-        a["review"] = reviews[-1] if reviews else None
-        a["request"] = a["review"]["request"] if a["review"] else None
-        a["conclusion"] = self.one(
-            "SELECT * FROM conclusions WHERE applicationId=?", (applicationId,)
+        application["latest"] = application["versions"][-1]
+        reviews = application["latest"]["reviews"]
+        application["review"] = reviews[-1] if reviews else None
+        application["request"] = (
+            application["review"]["request"] if application["review"] else None
         )
-        a["history"] = self.many(
+        application["conclusion"] = self.one(
+            "SELECT * FROM conclusions WHERE applicationId=?", (application_id,)
+        )
+        application["history"] = self.many(
             "SELECT e.*,u.phone AS actorPhone,u.role AS actorRole FROM status_events e "
             "JOIN users u ON u.id=e.initiatorId WHERE applicationId=? ORDER BY number",
-            (applicationId,),
+            (application_id,),
         )
-        return a
+        return application
 
-    def loadSupplementContext(self, applicationId, applicantId, sourceVersionId=None):
-        self.permitted(applicationId, dict(id=applicantId, role="APPLICANT"))
+    def load_supplement_context(
+        self, application_id, applicant_id, source_version_id=None
+    ):
+        self.permitted(application_id, dict(id=applicant_id, role="APPLICANT"))
         row = self.one(
             "SELECT id FROM versions WHERE applicationId=? AND id=?",
-            (applicationId, sourceVersionId),
+            (application_id, source_version_id),
         )
         require(row, "Исходная версия не найдена в этой заявке.", 409)
         return self.version(row["id"], content=True)
 
-    def beginAndLock(self, applicationId, applicantId):
+    def begin_and_lock(self, application_id, applicant_id):
         self.begin()
         return Application(
-            self.view(applicationId, dict(id=applicantId, role="APPLICANT"))
+            self.view(application_id, dict(id=applicant_id, role="APPLICANT"))
         )
 
-    def beginAndLockForReview(self, applicationId, specialistId):
+    def begin_and_lock_for_review(self, application_id, specialist_id):
         self.begin()
         return Application(
-            self.view(applicationId, dict(id=specialistId, role="SPECIALIST"))
+            self.view(application_id, dict(id=specialist_id, role="SPECIALIST"))
         )
 
-    def save(self, changeSet):
-        c = changeSet
+    def save(self, change: ChangeSet) -> None:
+        """Persist a change within the caller's transaction; do not commit here."""
         if not self.db.in_transaction:
             self.begin()
         stamp = now()
-        if c.applicantId:
+        if change.applicant_id:
             self.db.execute(
                 "INSERT INTO applications VALUES (?,?,?,?)",
-                (c.applicationId, c.applicantId, c.status, stamp),
+                (change.application_id, change.applicant_id, change.status, stamp),
             )
-        if c.version:
-            v = c.version
-            version_id = uid()
+        if change.version:
+            self._save_version(change, stamp)
+        if change.review:
+            self._save_review(change, stamp)
+        if change.decision:
+            self._save_decision(change, stamp)
+        if change.status:
+            self._save_status(change, stamp)
+
+    def _save_version(self, change: ChangeSet, stamp: str) -> None:
+        version = change.version
+        version_id = uid()
+        self.db.execute(
+            "INSERT INTO versions VALUES (?,?,?,?,?,?)",
+            (
+                version_id,
+                change.application_id,
+                version["requestId"],
+                version["number"],
+                json.dumps(version["questionnaire"].to_payload(), ensure_ascii=False),
+                stamp,
+            ),
+        )
+        items = {}
+        for item in version["checklist"]:
+            item_id = uid()
+            items[item["code"]] = item_id
             self.db.execute(
-                "INSERT INTO versions VALUES (?,?,?,?,?,?)",
+                "INSERT INTO checklist_items VALUES (?,?,?,?,?)",
                 (
+                    item_id,
                     version_id,
-                    c.applicationId,
-                    v["requestId"],
-                    v["number"],
-                    json.dumps(asdict(v["questionnaire"]), ensure_ascii=False),
-                    stamp,
+                    item["code"],
+                    item["requiredAction"],
+                    item["basis"],
                 ),
             )
-            items = {}
-            for item in v["checklist"]:
-                item_id = uid()
-                items[item["code"]] = item_id
-                self.db.execute(
-                    "INSERT INTO checklist_items VALUES (?,?,?,?,?)",
-                    (
-                        item_id,
-                        version_id,
-                        item["code"],
-                        item["requiredAction"],
-                        item["basis"],
-                    ),
-                )
-            for d in v["documents"]:
-                self.db.execute(
-                    "INSERT INTO documents VALUES (?,?,?,?,?,?,?,?)",
-                    (
-                        uid(),
-                        version_id,
-                        items[d["code"]],
-                        d["kind"],
-                        d["fileName"],
-                        d["mediaType"],
-                        d["content"],
-                        stamp,
-                    ),
-                )
-        if c.review:
-            r = c.review
-            existing = self.one("SELECT id FROM reviews WHERE id=?", (r["id"],))
-            if not existing:
-                self.db.execute(
-                    "INSERT INTO reviews VALUES (?,?,?,?,?,?,?)",
-                    (
-                        r["id"],
-                        r["versionId"],
-                        r["specialistId"],
-                        r["state"],
-                        stamp,
-                        None,
-                        0,
-                    ),
-                )
-            else:
-                self.db.execute(
-                    "UPDATE reviews SET state=?, assessedAt=?,revision=revision+1 WHERE id=?",
-                    (r["state"], stamp, r["id"]),
-                )
-                if not c.decision:
-                    self.db.execute("DELETE FROM findings WHERE reviewId=?", (r["id"],))
-                    items = {
-                        i["code"]: i["id"]
-                        for i in self.many(
-                            "SELECT * FROM checklist_items WHERE versionId=?",
-                            (r["versionId"],),
-                        )
-                    }
-                    for f in r["findings"]:
-                        self.db.execute(
-                            "INSERT INTO findings VALUES (?,?,?,?,?)",
-                            (
-                                uid(),
-                                r["id"],
-                                items[f["code"]],
-                                f["assessment"],
-                                f["comment"],
-                            ),
-                        )
-        if c.decision:
-            d = c.decision
-            if d["kind"] == "request":
-                self.db.execute(
-                    "INSERT INTO supplement_requests VALUES (?,?,?,?)",
-                    (uid(), c.review["id"], d["text"], stamp),
-                )
-            else:
-                self.db.execute(
-                    "INSERT INTO conclusions VALUES (?,?,?,?,?)",
-                    (uid(), c.review["id"], c.applicationId, d["text"], stamp),
-                )
-        if c.status:
-            previous = self.one(
-                "SELECT newStatus FROM status_events WHERE applicationId=? "
-                "ORDER BY number DESC LIMIT 1",
-                (c.applicationId,),
-            )
-            number = (
-                self.one(
-                    "SELECT count(*) AS n FROM status_events WHERE applicationId=?",
-                    (c.applicationId,),
-                )["n"]
-                + 1
-            )
+        for document in version["documents"]:
             self.db.execute(
-                "INSERT INTO status_events VALUES (?,?,?,?,?,?,?,?)",
+                "INSERT INTO documents VALUES (?,?,?,?,?,?,?,?)",
                 (
                     uid(),
-                    c.applicationId,
-                    c.actorId,
-                    number,
-                    previous["newStatus"] if previous else None,
-                    c.status,
+                    version_id,
+                    items[document["code"]],
+                    document["kind"],
+                    document["fileName"],
+                    document["mediaType"],
+                    document["content"],
                     stamp,
-                    c.comment,
                 ),
             )
+
+    def _save_review(self, change: ChangeSet, stamp: str) -> None:
+        review = change.review
+        existing = self.one("SELECT id FROM reviews WHERE id=?", (review["id"],))
+        if not existing:
             self.db.execute(
-                "UPDATE applications SET status=? WHERE id=?",
-                (c.status, c.applicationId),
+                "INSERT INTO reviews VALUES (?,?,?,?,?,?,?)",
+                (
+                    review["id"],
+                    review["versionId"],
+                    review["specialistId"],
+                    review["state"],
+                    stamp,
+                    None,
+                    0,
+                ),
             )
+        else:
+            self.db.execute(
+                "UPDATE reviews SET state=?, assessedAt=?,revision=revision+1 WHERE id=?",
+                (review["state"], stamp, review["id"]),
+            )
+            if not change.decision:
+                self.db.execute(
+                    "DELETE FROM findings WHERE reviewId=?", (review["id"],)
+                )
+                items = {
+                    item["code"]: item["id"]
+                    for item in self.many(
+                        "SELECT * FROM checklist_items WHERE versionId=?",
+                        (review["versionId"],),
+                    )
+                }
+                for finding in review["findings"]:
+                    self.db.execute(
+                        "INSERT INTO findings VALUES (?,?,?,?,?)",
+                        (
+                            uid(),
+                            review["id"],
+                            items[finding["code"]],
+                            finding["assessment"],
+                            finding["comment"],
+                        ),
+                    )
+
+    def _save_decision(self, change: ChangeSet, stamp: str) -> None:
+        decision = change.decision
+        if decision["kind"] == "request":
+            self.db.execute(
+                "INSERT INTO supplement_requests VALUES (?,?,?,?)",
+                (uid(), change.review["id"], decision["text"], stamp),
+            )
+        else:
+            self.db.execute(
+                "INSERT INTO conclusions VALUES (?,?,?,?,?)",
+                (
+                    uid(),
+                    change.review["id"],
+                    change.application_id,
+                    decision["text"],
+                    stamp,
+                ),
+            )
+
+    def _save_status(self, change: ChangeSet, stamp: str) -> None:
+        previous = self.one(
+            "SELECT newStatus FROM status_events WHERE applicationId=? "
+            "ORDER BY number DESC LIMIT 1",
+            (change.application_id,),
+        )
+        number = (
+            self.one(
+                "SELECT count(*) AS n FROM status_events WHERE applicationId=?",
+                (change.application_id,),
+            )["n"]
+            + 1
+        )
+        self.db.execute(
+            "INSERT INTO status_events VALUES (?,?,?,?,?,?,?,?)",
+            (
+                uid(),
+                change.application_id,
+                change.actor_id,
+                number,
+                previous["newStatus"] if previous else None,
+                change.status,
+                stamp,
+                change.comment,
+            ),
+        )
+        self.db.execute(
+            "UPDATE applications SET status=? WHERE id=?",
+            (change.status, change.application_id),
+        )

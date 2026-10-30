@@ -798,3 +798,8 @@ summary {
     padding: 35px 25px;
   }
 }
+
+.deadline-overdue {
+  color: #955125;
+  font-weight: 600;
+}

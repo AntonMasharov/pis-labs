@@ -8,7 +8,7 @@ import os
 import re
 import sqlite3
 import sys
-from http.cookies import SimpleCookie
+from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import quote, urlsplit
@@ -67,17 +67,40 @@ class Handler(BaseHTTPRequestHandler):
         cookies = SimpleCookie()
         try:
             cookies.load(self.headers.get("Cookie", ""))
-        except Exception:
+        except CookieError:
             return ""
         return cookies["session"].value if "session" in cookies else ""
 
     def do_GET(self):
-        self.handleRequest(False)
+        self.handle_request(False)
 
     def do_POST(self):
-        self.handleRequest(True)
+        self.handle_request(True)
 
-    def handleRequest(self, post):
+    def read_command(self) -> dict:
+        """Read a bounded JSON object from a POST request."""
+        require(
+            self.headers.get("Content-Type", "").split(";")[0] == "application/json",
+            "Ожидается JSON.",
+            415,
+        )
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            raise DomainError("Некорректный размер запроса.") from None
+        require(
+            0 < length <= 23 * 1024 * 1024,
+            "Запрос пуст или слишком велик.",
+            413,
+        )
+        try:
+            command = json.loads(self.rfile.read(length))
+        except (ValueError, UnicodeDecodeError):
+            raise DomainError("Некорректный JSON.") from None
+        require(isinstance(command, dict), "Ожидается объект JSON.")
+        return command
+
+    def handle_request(self, post):
         try:
             expected = {
                 f"127.0.0.1:{self.server.server_port}",
@@ -107,32 +130,11 @@ class Handler(BaseHTTPRequestHandler):
                 }[name]
                 return self.send(200, (ROOT / "static" / name).read_bytes(), media)
             require(path.startswith("/api/"), "Страница не найдена.", 404)
-            command = {}
-            if post:
-                require(
-                    self.headers.get("Content-Type", "").split(";")[0]
-                    == "application/json",
-                    "Ожидается JSON.",
-                    415,
-                )
-                try:
-                    length = int(self.headers.get("Content-Length", "0"))
-                except ValueError:
-                    raise DomainError("Некорректный размер запроса.") from None
-                require(
-                    0 < length <= 23 * 1024 * 1024,
-                    "Запрос пуст или слишком велик.",
-                    413,
-                )
-                try:
-                    command = json.loads(self.rfile.read(length))
-                except (ValueError, UnicodeDecodeError):
-                    raise DomainError("Некорректный JSON.") from None
-                require(isinstance(command, dict), "Ожидается объект JSON.")
+            command = self.read_command() if post else {}
             with ApplicationRepository(self.server.db_path) as store:
                 auth = SessionService(store)
                 if post and path == "/api/auth/code":
-                    return self.send(200, auth.sendCode(command))
+                    return self.send(200, auth.send_code(command))
                 if post and path == "/api/auth/verify":
                     token, result = auth.authenticate(command)
                     return self.send(
@@ -142,7 +144,7 @@ class Handler(BaseHTTPRequestHandler):
                             "Set-Cookie": f"session={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=86400"
                         },
                     )
-                user = auth.requireSession(self.token())
+                user = auth.require_session(self.token())
                 if post:
                     require(
                         hmac.compare_digest(
@@ -174,12 +176,12 @@ class Handler(BaseHTTPRequestHandler):
                         },
                     )
                 if post and path == "/api/checklist":
-                    SessionService.requireRole(user, "APPLICANT")
-                    q, _ = SupplementValidator().validate(
+                    SessionService.require_role(user, "APPLICANT")
+                    questionnaire, _ = SupplementValidator().validate(
                         dict(questionnaire=command.get("questionnaire"))
                     )
                     return self.send(
-                        200, dict(checklist=ChecklistPolicy().calculate(q))
+                        200, dict(checklist=ChecklistPolicy().calculate(questionnaire))
                     )
                 if path == "/api/applications":
                     if post:
@@ -190,7 +192,7 @@ class Handler(BaseHTTPRequestHandler):
                         dict(
                             applications=ApplicationQueryService(
                                 store
-                            ).listApplications(user)
+                            ).list_applications(user)
                         ),
                     )
                 match = re.fullmatch(
@@ -202,7 +204,7 @@ class Handler(BaseHTTPRequestHandler):
                     if not post and not action:
                         return self.send(
                             200,
-                            ApplicationQueryService(store).getOwnApplication(
+                            ApplicationQueryService(store).get_own_application(
                                 user, app_id
                             ),
                         )
