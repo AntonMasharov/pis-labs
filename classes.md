@@ -134,6 +134,7 @@ classDiagram
         +StatusEvent newEvent
     }
     class ApplicationRepository {
+        +permitted(applicationId, user) ApplicationView
         +load_supplement_context(applicationId, applicantId) ContextResult
         +begin_and_lock(applicationId, applicantId) LockResult
         +begin_and_lock_for_review(applicationId, specialistId) LockResult
@@ -153,8 +154,13 @@ classDiagram
     }
     class ApplicationQueryService {
         +get_own_application(applicantId, applicationId) ApplicationView
+        +list_applications(user) ApplicationView[]
         +listCompleted(applicantId) ApplicationView[]
         +listPending(specialistId) ApplicationView[]
+    }
+    class domain {
+        <<module>>
+        +processing_deadline(submitted_at) String
     }
     class Role {
         <<enumeration>>
@@ -225,6 +231,8 @@ classDiagram
     ReviewService ..> ApplicationRepository
     ReviewService ..> Application : review operations
     ApplicationQueryService ..> ApplicationRepository : reads
+    ApplicationQueryService ..> domain : processing_deadline for list
+    ApplicationRepository ..> domain : processing_deadline for detail
     User ..> Role
     Application ..> ApplicationStatus
     StatusEvent ..> ApplicationStatus
@@ -300,4 +308,4 @@ classDiagram
 
 Поля предметной модели в диаграмме соответствуют ключам JSON и столбцам БД (`camelCase`). В Python поля `Questionnaire` и `ChangeSet` используют `snake_case`; `Questionnaire.to_payload()` сохраняет исходные имена при сериализации. Названия реализованных операций приведены в стиле Python.
 
-Срок исполнения — вычисляемое значение `dueAt`: дата первоначальной подачи плюс 3 календарных дня. Оно доступно обеим ролям; дополнение не переносит срок. Длительность — условие учебной реализации, а не нормативный срок; требование показывать сроки сообщено пользователем по заметке со встречи с преподавателем.
+Функция `processing_deadline(submitted_at)` модуля `domain` прибавляет к дате первоначальной подачи 3 календарных дня и возвращает срок в формате ISO 8601. `ApplicationQueryService.list_applications` добавляет его в список заявок как `dueAt`, а `ApplicationRepository.permitted` добавляет то же поле при чтении карточки. Срок доступен обеим ролям и сохраняется при дополнении. Три дня — условие учебной реализации.
