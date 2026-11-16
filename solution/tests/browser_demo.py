@@ -167,8 +167,16 @@ def run(record):
             page.locator("#citizenship").select_option("Узбекистан")
             page.get_by_role("button", name="Показать индивидуальный перечень").click()
             expect(page.locator("#calculated")).to_contain_text("Получить ИНН")
+            certificate_item = page.locator("#calculated").get_by_text(
+                "Обратиться в образовательную организацию"
+            )
+            expect(certificate_item).to_contain_text("сдать экзамен")
+            expect(certificate_item).to_contain_text("до подачи заявления на патент")
+            certificate_item.scroll_into_view_if_needed()
             pause(
-                "Анкета определяет три пункта: сертификат, цветные фото 3×4 и ИНН.", 3
+                "Пункт 5.1: сдать экзамен в образовательной организации "
+                "и получить сертификат до подачи заявления на патент.",
+                6,
             )
             page.locator("#file-52").set_input_files(photo)
             page.get_by_role(
